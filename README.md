@@ -22,6 +22,8 @@ Models has been built, train and tested over <b>"mmdetection tool"</b>. Model c
 * roi extractor: the part for extracting RoI features from feature maps, e.g., RoI Align.
 * loss: the component in head for calculating losses, e.g., FocalLoss, L1Loss, and GHMLoss.
 
+Final result is ensemble of only two models i.e., RTMDet and Mask R-CNN.
+
 ### RTMDet Model
 -----
 ![hubmap](https://github.com/bishnarender/hubmap-hacking-the-human-vasculature/assets/49610834/f1617cc3-aad7-4abc-95b9-80e89cc8ba2f)
@@ -371,7 +373,7 @@ roi_align = RoIAlignFunction.apply
 roi_align(input, rois, self.output_size, self.spatial_scale, self.sampling_ratio, self.pool_mode, self.aligned)
 </code>
 
-Outputs of "Shared2FCBBoxHead" block are our final raw "classification scores ([1000, 4])" and "bbox predictions ([1000, 12])". The 4 indices in dim=1 of classification scores represents "num_classes+1". The 12 indices in dim=1 of bbox predictions represents "num_classes*num_box_coordinates" i.e., 3*4.
+Outputs of "Shared2FCBBoxHead" block are our final raw "classification scores ([1000, 4])" and "bbox predictions ([1000, 12])". The 4 indices in dim=1 of classification scores represents "num_classes+1". The 12 indices in dim=1 of bbox predictions represents "num_classes\*num_box_coordinates" i.e., 3*4.
 
 Further, final classification loss (i.e., loss_cls) is computed using "cross_entropy" between final raw "classification scores" and labels. 
 <code>
