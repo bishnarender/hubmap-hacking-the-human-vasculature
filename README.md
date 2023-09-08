@@ -32,11 +32,12 @@ Models has been built, train and tested over <b>"mmdetection tool"</b>. Model c
 #- type(self.rtm_reg[idx]) => <class 'torch.nn.modules.conv.Conv2d'>
 #- reg_feat.shape  => torch.Size([2, 320, 96, 96]) #- 2 = BS
 #- stride[0] = 8
-reg_dist = self.rtm_reg[idx](reg_feat).exp() * stride[0]
+reg_dist = self.rtm_reg\[idx\](reg_feat).exp() * stride[0]
 #- reg_dist => "regression distribution" represents the predicted "offsets or deltas" that are used to adjust the coordinates of bounding boxes during object detection.
 </code>
 
-<b>[BS, 3, 96, 96]</b> is a raw classification score at scale 1/8 (96 = 768/8). number of channels = num_anchors*num_classes i.e., num_anchors = 1 and num_classes=3. 
+<b>[BS, 3, 96, 96]</b> is a raw classification score at scale 1/8 (96 = 768/8). number of channels = num_anchors\*num_classes i.e., num_anchors = 1 and num_classes=3. 
+
 <b>[BS, 4, 96, 96]</b> is predicted "offsets or deltas" at scale 1/8 (96 = 768/8). number of channels = num_anchors*4.
 
 The term "regression" refers to the process of predicting continuous numerical values that need to be adjusted from some reference values. In object detection, regression is used to predict the adjustments (deltas) that need to be applied to the coordinates of the default or anchor bounding boxes to better fit the actual objects in the image.
