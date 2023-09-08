@@ -368,7 +368,7 @@ Furhter, after NMS supplied 1000 "anchor boxes" then in the same fashion as desc
 
 Prior to feeding "anchor boxes" to "SingleRoIExtractor" block, the 5 indices of last dimension is changed i.e., now the index 0 corresponds to batch_id and rest 4 are bbox coordinates. SingleRoIExtractor first partition the "proposals"/"anchor boxes" to the corresponding feature level in accordance to the "scale" (scale is square root of the product of proposal width and height). SingleRoIExtractor then aligns the feature vectors with the corresponding "proposals" and extracts the RoI from "feature vector". Each proposal is defined by a rectangle in the "feature map/vector" and typically represents a region of interest. SingleRoIExtractor performs its operation by using the "class RoIAlign" of file "https://github.com/open-mmlab/mmcv/blob/main/mmcv/ops/roi_align.py".
 <code>
-#- https://github.com/open-mmlab/mmcv/blob/main/mmcv/ops/roi_align.py
+...
 roi_align = RoIAlignFunction.apply
 roi_align(input, rois, self.output_size, self.spatial_scale, self.sampling_ratio, self.pool_mode, self.aligned)
 </code>
