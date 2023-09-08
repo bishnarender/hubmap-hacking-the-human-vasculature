@@ -150,7 +150,6 @@ Further, top-k matching anchor boxes and target bboxes are used in calculation o
 #- https://github.com/open-mmlab/mmdetection/blob/main/mmdet/structures/bbox/bbox_overlaps.py
 #- bboxes1.shape, bboxes2.shape => torch.Size([68, 4]), torch.Size([68, 4])
 #- bboxes1 => anchor boxes, bboxes2 => targets
-
 #- area = (x2 - x1) * (y2 - y1)
 area1 = (bboxes1[..., 2] - bboxes1[..., 0]) * ( bboxes1[..., 3] - bboxes1[..., 1])
 area2 = (bboxes2[..., 2] - bboxes2[..., 0]) * ( bboxes2[..., 3] - bboxes2[..., 1])
@@ -194,5 +193,213 @@ Separate "mask head (FCNMaskHead)" is been employed in RTMDet model. And, mask l
 
 ### Mask R-CNN Model
 -----
+![hubmap_](https://github.com/bishnarender/hubmap-hacking-the-human-vasculature/assets/49610834/be73004d-3960-4d15-8410-9f6d5f9c2235)
+![hubmap_1_](https://github.com/bishnarender/hubmap-hacking-the-human-vasculature/assets/49610834/cce3df4c-e9c9-45be-8b38-5b6d34219b3d)
+
+<b>[BS, 3, 320, 320], [BS, 3, 160, 160], ..., and [BS, 3, 20, 20]</b> are our raw "classification scores" or "classification predictions" at different scales [1/4, 1/8, 1/16, 1/32, 1/64].
+
+Anchor Boxes are generated for each scale [1/4, 1/8, 1/16, 1/32, 1/64] using <b>torch.meshgrid(*tensors, indexing=None)</b>, with a slightly different method from RTMDet. For example, for the scale 1/4 and output (320,320) the anchor boxes are generated as follows:
+<code>
+#- https://github.com/open-mmlab/mmdetection/blob/main/mmdet/models/task_modules/prior_generators/anchor_generator.py
+#- AnchorGenerator
+#- len(self.base_anchors) => 5
+base_anchors = self.base_anchors[level_idx].to(device).to(dtype) #- level_idx = 0
+#- base_anchors => 
+#- tensor([[-22.6274, -11.3137,  22.6274,  11.3137],
+#-         [-16.0000, -16.0000,  16.0000,  16.0000],
+#-         [-11.3137, -22.6274,  11.3137,  22.6274]], device='cuda:0')
+#- 4 = stride = 1280/320.
+
+shift_x = (torch.arange(0, 320, device=device) +  0) * 4
+shift_y = (torch.arange(0, 320, device=device) +  0) * 4
+shift_yy, shift_xx = torch.meshgrid(shift_y, shift_x)
+shifts = torch.stack([shift_xx, shift_yy, shift_xx, shift_yy], dim=-1)
+#- shifts  =>
+#- tensor([[ 0.,  0.,  0.,  0.],
+#-         [ 4.,  0.,  4.,  0.],
+#-         [ 8.,  0.,  8.,  0.],
+#-         ...
+#-         [1272.,  0., 1272.,  0.],
+#-         [1276.,  0., 1276.,  0.],
+#-         ...
+#-         ...
+#-         [ 0.,  1276.,  0.,  1276.],
+#-         [ 4.,  1276.,  4.,  1276.],
+#-         [ 8.,  1276.,  8., 1276.],        
+#-         ...
+#-         [1272., 1276., 1272., 1276.],
+#-         [1276., 1276., 1276., 1276.]], device='cuda:0')        
+
+#- shifts.shape => torch.Size([102400, 4])
+all_anchors = base_anchors[None, :, :] + shifts[:, None, :]        
+all_anchors = all_anchors.view(-1, 4)
+#- all_anchors[:5] =>
+#- tensor([[-22.6274, -11.3137,  22.6274,  11.3137],
+#-         [-16.0000, -16.0000,  16.0000,  16.0000],
+#-         [-11.3137, -22.6274,  11.3137,  22.6274],
+#-         [-18.6274, -11.3137,  26.6274,  11.3137],
+#-         [-12.0000, -16.0000,  20.0000,  16.0000]], device='cuda:0')        
+
+#- all_anchors.shape (i.e., our anchor boxes) => torch.Size([307200, 4])
+</code>
+Finally all anchor boxes are concatenated to have shape [409200, 4] i.e., 307200 + 76800 + 19200 + 4800 + 1200 = 409200.
+
+Further, overlap of these anchor boxes with gt bboxes is computed:
+<code>
+#- https://github.com/open-mmlab/mmdetection/blob/main/mmdet/structures/bbox/bbox_overlaps.py
+#- bboxes1.shape, bboxes2.shape => torch.Size([4, 4]), torch.Size([409200, 4])
+#- bboxes1 => gt bboxes, bboxes2 => anchor boxes
+area1 = (bboxes1[..., 2] - bboxes1[..., 0]) * ( bboxes1[..., 3] - bboxes1[..., 1])
+area2 = (bboxes2[..., 2] - bboxes2[..., 0]) * ( bboxes2[..., 3] - bboxes2[..., 1])
+lt = torch.max(bboxes1[..., :, None, :2], bboxes2[..., None, :, :2]) 
+rb = torch.min(bboxes1[..., :, None, 2:], bboxes2[..., None, :, 2:])
+
+wh = (rb - lt).clamp(min=0)
+overlap = wh[..., 0] * wh[..., 1]
+union = area1[..., None] + area2[..., None, :] - overlap
+
+eps = union.new_tensor([eps])
+#- eps => tensor([1.0000e-06], device='cuda:0')
+union = torch.max(union, eps)
+ious = overlap / union
+#- ious.shape => torch.Size([4, 409200])
+</code>
+"ious" is our "overlaps".
 
 
+From these overlaps, top matching anchor boxes (with gt bboxes) are extracted which have iou score greater than or equal to 0.3. As follows:
+<code>
+#- https://github.com/open-mmlab/mmdetection/blob/main/mmdet/models/task_modules/assigners/max_iou_assigner.py
+max_overlaps, argmax_overlaps = overlaps.max(dim=0)
+#- max_overlaps => maximum of "4 iou scores" that anchor boxes have with "4 gt bboxes".
+#- argmax_overlaps => index of "gt bbox" with which anchor boxes have maximum score.
+#- max_overlaps.shape => torch.Size([409200])        
+      
+gt_max_overlaps, gt_argmax_overlaps = overlaps.max(dim=1)
+#- gt_max_overlaps => maximum score from all scores that "gt bboxes" have with "anchor boxes".
+#- gt_argmax_overlaps => index of "anchor box" with which "gt bboxes" have maximum score.
+
+#- gt_max_overlaps.shape => torch.Size([4])
+#- self.neg_iou_thr => 0.3
+
+assigned_gt_inds[(max_overlaps >= 0) & (max_overlaps < self.neg_iou_thr)] = 0
+#- assign 0 gt index to scores (from max_overlaps) less than 0.3.
+
+pos_inds = max_overlaps >= self.pos_iou_thr
+assigned_gt_inds[pos_inds] = argmax_overlaps[pos_inds] + 1
+#- assign "org gt index"+1 to scores (from max_overlaps) greater than or equal to 0.3.
+
+#- self.match_low_quality => True
+if self.match_low_quality:
+    for i in range(num_gts):
+        #- self.min_pos_iou => 0.3
+        #- gt_max_overlaps => maximum score from all scores that "gt bboxes" have with "anchor boxes".
+        if gt_max_overlaps[i] >= self.min_pos_iou:
+            #- self.gt_max_assign_all => True
+            if self.gt_max_assign_all:
+                max_iou_inds = overlaps[i, :] == gt_max_overlaps[i]
+                assigned_gt_inds[max_iou_inds] = i + 1
+                #- assign "org gt index"+1 to scores (from max_overlaps) which have match with max value at "org gt index" from scores (from overlaps).
+</code> 
+
+Further, rpn classification loss (i.e., loss_rpn_cls) is computed using binary_cross_entropy_with_logits between raw "classification scores" and labels, at each scale [1/4, 1/8, 1/16, 1/32, 1/64]. For example for scale 1/4, labels ([307200]) have value 1 where there is match between anchor boxes and gt bboxes elsewhere 0. Raw "classification scores" are reshaped to [BS, 307200] from [BS, 3, 320, 320], before calculation.
+
+<b>[BS, 12, 320, 320], [BS, 12, 160, 160], ..., and [BS, 12, 20, 20]</b> are our "bbox predictions" at different scales [1/4, 1/8, 1/16, 1/32, 1/64]. Before calculation of "rpn smooth l1 loss", bbox predictions are reshaped to <b>[BS, 307200, 4], [BS, 76800, 4], ..., and [BS, 1200, 4]</b>.
+
+RPN smooth L1 loss (i.e., loss_rpn_bbox) is computed between "bbox predictions" and "anchor boxes", at each scale. As follows:
+<code>
+#- https://github.com/open-mmlab/mmdetection/blob/main/mmdet/models/dense_heads/anchor_head.py
+#- https://github.com/open-mmlab/mmdetection/blob/main/mmdet/models/losses/smooth_l1_loss.py
+#- pred.shape => torch.Size([307200, 4])
+#- target.shape => torch.Size([307200, 4]) #- anchor boxes
+loss = torch.abs(pred - target)
+</code>
+
+Under "mathematical operations" block, RPN predicts 1000 bboxes after NMS with IoU threshold=0.70. NMS is performed as per "def batched_nms()" in file "https://github.com/open-mmlab/mmcv/blob/main/mmcv/ops/nms.py". NMS will not be applied between elements of different idxs/scales [1/4, 1/8, 1/16, 1/32, 1/64]. The 5th dimension of bbox have the corresponding "classification score".
+
+During RPN prediction, first top 2000 "bbox predictions" are selected at each level based on predicted "classificaton scores". Second, based on these "bbox predictions" corresponding "anchor boxes" are selected. Actually, "anchor boxes" are our proposed bounding boxes and the "bbox predictions" are network outputs used to shift/scale those boxes. Finally, these "anchor bboxes" are shifted according to "bbox predictions":
+<code>
+#- https://github.com/open-mmlab/mmdetection/blob/main/mmdet/models/task_modules/coders/delta_xywh_bbox_coder.py
+#- deltas.shape => torch.Size([9200, 4])
+#- means => [0.0, 0.0, 0.0, 0.0]
+means = deltas.new_tensor(means).view(1, -1)
+#- means => tensor([[0., 0., 0., 0.]], device='cuda:0', dtype=torch.float16)
+stds = deltas.new_tensor(stds).view(1, -1)
+#- stds => tensor([[1., 1., 1., 1.]], device='cuda:0', dtype=torch.float16)
+denorm_deltas = deltas * stds + means
+
+#- calculating the shift/delta/change required in the center (dxy) and size (dwh).
+dxy = denorm_deltas[:, :2]
+dwh = denorm_deltas[:, 2:]
+
+#- rois.shape => torch.Size([9200, 4])    
+#- num_classes => 1
+#- rois.repeat(1, num_classes).shape => torch.Size([9200, 4])
+
+#- "rois" are our anchor boxes.
+rois_ = rois.repeat(1, num_classes).reshape(-1, 4)
+#- rois_.shape => torch.Size([9200, 4])    
+pxy = ((rois_[:, :2] + rois_[:, 2:]) * 0.5) #- center point of each bounding box. 
+pwh = (rois_[:, 2:] - rois_[:, :2]) #- width and height of each bounding box. 
+
+#- scaling the center adjustments by the width and height of each bounding box.
+dxy_wh = pwh * dxy
+
+
+max_ratio = np.abs(np.log(wh_ratio_clip))
+#- wh_ratio_clip, max_ratio => 0.016, 4.135166556742356
+dwh = dwh.clamp(min=-max_ratio, max=max_ratio)
+
+gxy = pxy + dxy_wh
+#- .exp() => scale the width and height adjustments, effectively converting them from log-space to linear space.
+gwh = pwh * dwh.exp()
+
+#- top-left => subtracting half of the adjusted width and height (gwh * 0.5) from the adjusted center (x, y) coordinates. 
+x1y1 = gxy - (gwh * 0.5)
+
+#- bottom-right =>  subtracting half of the adjusted width and height (gwh * 0.5) from the adjusted center (x, y) coordinates. 
+x2y2 = gxy + (gwh * 0.5)
+bboxes = torch.cat([x1y1, x2y2], dim=-1)
+</code>
+
+Furhter, after NMS supplied 1000 "anchor boxes" then in the same fashion as described above overlap of these 1000 with "gt bboxes" is computed. And from these overlaps, top matching anchor boxes (with gt bboxes) are extracted which have iou score greater than or equal to 0.3. 
+
+Prior to feeding "anchor boxes" to "SingleRoIExtractor" block, the 5 indices of last dimension is changed i.e., now the index 0 corresponds to batch_id and rest 4 are bbox coordinates. SingleRoIExtractor first partition the "proposals"/"anchor boxes" to the corresponding feature level in accordance to the "scale" (scale is square root of the product of proposal width and height). SingleRoIExtractor then aligns the feature vectors with the corresponding "proposals" and extracts the RoI from "feature vector". Each proposal is defined by a rectangle in the "feature map/vector" and typically represents a region of interest. SingleRoIExtractor performs its operation by using the "class RoIAlign" of file "https://github.com/open-mmlab/mmcv/blob/main/mmcv/ops/roi_align.py".
+<code>
+#- https://github.com/open-mmlab/mmcv/blob/main/mmcv/ops/roi_align.py
+roi_align = RoIAlignFunction.apply
+roi_align(input, rois, self.output_size, self.spatial_scale, self.sampling_ratio, self.pool_mode, self.aligned)
+</code>
+
+Outputs of "Shared2FCBBoxHead" block are our final raw "classification scores ([1000, 4])" and "bbox predictions ([1000, 12])". The 4 indices in dim=1 of classification scores represents "num_classes+1". The 12 indices in dim=1 of bbox predictions represents "num_classes*num_box_coordinates" i.e., 3*4.
+
+Further, final classification loss (i.e., loss_cls) is computed using "cross_entropy" between final raw "classification scores" and labels. 
+<code>
+labels.unique() => tensor([0, 1, 2, 3], device='cuda:0')
+#- 3 (an additional class) is used to represent the "background" or "no object" class.  
+#- By adding this background class, the network can differentiate between regions with objects and regions without objects.
+</code>
+
+Also, bbox predictions ([1000, 12]) are adjusted to shape ([1000, 3, 4]). Then, from dim=1 that index is chosen which corresponds to labels of corresponding "proposals". And, thus reshaping bbox predictions to ([1000, 4]). Finally, smooth L1 loss (i.e., loss_bbox) is computed between final "bbox predictions" and "proposals". 
+
+The top matching anchor boxes ( [50,5] i.e., having iou_score greater than or equal to 0.3) are only feeded to the 2nd "SingleRoIExtractor" block. And, the rest of the RoI extraction procedure is the same as described above. And, both time output feature vectors have different shapes ([..., 7, 7] and [..., 14, 14]) because we have mentioned this in the configuration file "configs/m0_debug.py".
+<code>
+...
+roi_layer=dict(type='RoIAlign', output_size=7, sampling_ratio=0)
+...
+roi_layer=dict(type='RoIAlign', output_size=14, sampling_ratio=0)
+...
+</code>
+The top matching anchor boxes ([50,5]) are also referred to as our positives.
+
+The output feature vectors of "FCNMaskHead" block are our "mask predictions". The required shape ([..., 28, 28]) is mentioned in configuration file "configs/m0_debug.py".
+<code>
+rcnn=dict(..., mask_size=28)
+</code>
+
+Gt masks are reshaped to ([50, 28, 28]) from  ([50, 1280, 1280]), with the help "gt bboxes" ([50, 4]).
+<code>
+#- https://github.com/open-mmlab/mmdetection/blob/main/mmdet/structures/mask/mask_target.py
+#- https://github.com/open-mmlab/mmdetection/blob/main/mmdet/structures/mask/structures.py
+</code>
+Further, mask predictions ([50, 3, 28, 28]) are reshaped to ([50, 28, 28]) by picking that index from dim=1 which corresponds to corresponding "gt mask" label. Finally, mask loss (i.e., loss_mask) is computed using "binary_cross_entropy_with_logits" between "mask predictions ([50, 28, 28])" and gt masks ([50, 28, 28]). 
